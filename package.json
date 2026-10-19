@@ -1,0 +1,26 @@
+{
+  "name": "token-garden",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev --webpack --hostname 127.0.0.1",
+    "build": "next build",
+    "start": "next start --hostname 127.0.0.1",
+    "test": "node --test tests/*.test.mjs",
+    "format": "prettier --write app lib tests package.json tsconfig.json README.md collector/README.md"
+  },
+  "dependencies": {
+    "next": "latest",
+    "postgres": "latest",
+    "react": "latest",
+    "react-dom": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "prettier": "^3.9.10",
+    "typescript": "latest"
+  }
+}
