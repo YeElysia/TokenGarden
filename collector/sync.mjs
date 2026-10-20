@@ -1,6 +1,7 @@
 import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { dirname } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { uploadFailureDetails } from "../lib/storage-error.mjs";
 const object = (value) =>
   value && typeof value === "object" && !Array.isArray(value);
 const hash = (value) =>
@@ -89,10 +90,17 @@ export async function syncSnapshots({
       redirect: "error",
       signal: AbortSignal.timeout(15000),
     });
-    if (!response.ok)
+    if (!response.ok) {
+      let failure;
+      try {
+        failure = await response.json();
+      } catch {
+        /* Older proxies may return HTML. */
+      }
       throw new Error(
-        `${label} 上传失败（HTTP ${response.status}），未确认的日期将在下次重试`,
+        `${label} 上传失败（HTTP ${response.status}${uploadFailureDetails(failure)}），未确认的日期将在下次重试`,
       );
+    }
     const result = await response.json();
     if (
       result.ok !== true ||
