@@ -1,12 +1,13 @@
 export type UsageRow = {
   date: string;
+  source: "ccs" | "dsh";
   device: string;
   client: string;
   model: string;
   input: number;
   output: number;
   cached: number;
-  requests: number;
+  requests: number | null;
 };
 export function demoRows(): UsageRow[] {
   let seed = 137;
@@ -39,6 +40,7 @@ export function demoRows(): UsageRow[] {
       const input = Math.round(random() ** 2 * 2400000);
       rows.push({
         date,
+        source: client === "OpenCode" ? "dsh" : "ccs",
         device,
         client,
         model,

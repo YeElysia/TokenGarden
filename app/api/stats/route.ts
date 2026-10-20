@@ -1,5 +1,6 @@
 import postgres from "postgres";
 import { demoRows } from "../../../lib/demo";
+import { readUsage } from "../../../lib/usage-store.mjs";
 export const dynamic = "force-dynamic";
 export async function GET() {
   if (!process.env.DATABASE_URL)
@@ -12,18 +13,11 @@ export async function GET() {
     });
     try {
       // Only explicitly public device labels belong in this table. No credentials or conversation data.
-      const rows =
-        await sql`select date::text, device, client, model, input_tokens as input, output_tokens as output, cached_input_tokens as cached, request_count as requests from usage_daily order by date`;
+      const rows = await readUsage((text, values) => sql.unsafe(text, values));
       return Response.json(
         {
           mode: "live",
-          rows: rows.map((r) => ({
-            ...r,
-            input: Number(r.input),
-            output: Number(r.output),
-            cached: Number(r.cached),
-            requests: Number(r.requests),
-          })),
+          rows,
           updatedAt: new Date().toISOString(),
         },
         {

@@ -16,7 +16,12 @@ const dateString = (d: Date) => d.toISOString().slice(0, 10);
 const EMPTY_ROWS: UsageRow[] = [];
 
 type Payload = { mode: string; rows: UsageRow[]; updatedAt: string | null };
-type Daily = { total: number; input: number; output: number; requests: number };
+type Daily = {
+  total: number;
+  input: number;
+  output: number;
+  requests: number | null;
+};
 
 function SectionHeading({
   number,
@@ -173,7 +178,10 @@ export default function Dashboard() {
     {
       title: "年度用量",
       value: summary.total,
-      note: full(summary.requests) + " 次模型请求",
+      note:
+        summary.requests === null
+          ? "请求数未完整统计"
+          : full(summary.requests) + " 次模型请求",
       icon: "model",
       unit: "tokens",
     },
@@ -253,7 +261,11 @@ export default function Dashboard() {
                     <span>
                       <b>{year}</b> / 01.01 — 12.31
                     </span>
-                    <span>{full(summary.requests)} 次请求</span>
+                    <span>
+                      {summary.requests === null
+                        ? "请求数未完整统计"
+                        : full(summary.requests) + " 次请求"}
+                    </span>
                   </div>
                   <div
                     className="heat-scroll"
@@ -392,7 +404,9 @@ export default function Dashboard() {
                     <div>
                       <dt>请求</dt>
                       <dd>
-                        {reading ? full(reading.requests) : "—"}
+                        {reading && reading.requests !== null
+                          ? full(reading.requests)
+                          : "—"}
                         <span> 次</span>
                       </dd>
                     </div>
