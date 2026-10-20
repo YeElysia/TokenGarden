@@ -4,14 +4,14 @@
 
 ## DSH
 
-已适配本机 `@duke-dsh-plugins/dsh-token-stats@1.7.3` 的 version 1 统计文件。直接读取 `$DSH_HOME/data/dsh-token-stats/stats.json`，默认 `DSH_HOME=~/.dsh`，不修改插件或统计文件，不读取会话日志、provider 凭据或套餐余额。
+支持原版 `@duke-dsh-plugins/dsh-token-stats@1.7.3` 的 version 1 文件，以及仓库内重写版 `2.0.0-local.1` 的 version 2 文件。直接读取 `$DSH_HOME/data/dsh-token-stats/stats.json`，默认 `DSH_HOME=~/.dsh`，不修改插件或统计文件，不读取会话日志、provider 凭据或套餐余额。
 
 转换口径：
 
 - 输入 = `input + cacheRead + cacheWrite`。
 - 输出 = `output`；`reasoning` 不额外相加，与原插件 total 保持一致。
 - 缓存输入子集 = `cacheRead`；保留 `provider::model` 完整模型键。
-- 客户端 = `DSH`；原文件未记录请求次数，因此上传 `requests: null`，页面显示请求数未完整统计。
+- 客户端 = `DSH`；version 1 未记录请求次数，上传 `requests: null`；version 2 上传已恢复的日志调用次数，历史覆盖不足时仍上传 null。次数包含已落盘失败尝试和辅助调用，不等同全部 HTTP 请求。
 - 日期沿用原插件的本地日历日期。需要与站点北京时间严格对齐时，应让 DSH 在 Asia/Shanghai 时区统计；已汇总的历史数据无法重新按时区拆分。
 
 先查看本地待同步日期和 token 总量，不联网、不写同步状态：
@@ -64,6 +64,12 @@ CCS 的服务端通道已实现，本地 CC Switch 读取适配器仍待实现�
 
 `revision` 是正安全整数，采集端应持久化并递增，重试保留原版本；它只用于跟踪上传进度，不作为高累计量的阻拦条件。响应 `applied: true`、`reason: merged` 表示至少新增或提高了一条记录；`applied: false`、`reason: not_higher` 表示没有记录需要提高。`rows: []` 是空操作。
 
-比较键为 `(date, source, device, client, model)`，比较值为 `input + output`。只有新总量严格更高时才整条替换输入、输出、缓存和请求次数；相同或更低总量保留原记录，不对每个字段分别取最大，避免拼出虚假的总量。例如旧记录输入/输出为 100/100，新记录为 200/50，结果是 250，不能拼成 200/100 的 300。此规则不支持自动调低历史误报，纠错需人工核对数据库。
+比较键为 `(date, source, device, client, model)`，比较值为 `input + output`。新总量严格更高时整条替换输入、输出、缓存和请求次数；总量更低时保留原记录。输入、输出和缓存均完全相同时，可把请求次数从 null 补齐，或用更高的请求次数更新；不会降低已知请求次数。其他相同总量的上传保留原记录，不对每个字段分别取最大，避免拼出虚假的总量。例如旧记录输入/输出为 100/100，新记录为 200/50，结果是 250，不能拼成 200/100 的 300。此规则不支持自动调低历史误报，纠错需人工核对数据库。
 
 token 与数据库连接串只保存在本地配置和服务端环境变量中。
+
+## 重写版 DSH 插件
+
+源码在 `plugins/dsh-token-stats/`，安装与验证见该目录 README。插件保留套餐余额功能，并将统计存储迁移到 version 2。重启 DSH 后自动备份 version 1 文件并回填；统计文件损坏时保留原件并显示错误，不能通过清空文件冒充迁移成功。缺少 usage 的调用仅计入次数，不估算 token，详细口径及不可恢复的标题用量见插件说明。
+
+部署这次更新时，在 Neon 再执行最新 `db/schema.sql`，使相同 token 下的请求次数回填可以入库。然后部署新版站点，使用新版采集器上传。
