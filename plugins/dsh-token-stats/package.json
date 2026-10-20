@@ -1,0 +1,73 @@
+{
+  "name": "@duke-dsh-plugins/dsh-token-stats",
+  "version": "2.0.0-local.1",
+  "description": "Personal DSH logged-call and token accounting with versioned event ledger and TokenGarden export.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MoonlitDropOfBlood/dsh-token-stats.git"
+  },
+  "homepage": "https://github.com/MoonlitDropOfBlood/dsh-token-stats",
+  "bugs": {
+    "url": "https://github.com/MoonlitDropOfBlood/dsh-token-stats/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "token",
+    "stats"
+  ],
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./typert": "./typert.host.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "typert.host.js",
+    "cordis.patch.yml",
+    "stats-core.mjs",
+    "store.mjs",
+    "quota.js"
+  ],
+  "license": "MIT",
+  "engines": {
+    "dsh": ">=0.1.4-rc.2 <0.3.0 || ^0.2.1-rc.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh": ">=0.1.4-rc.2 <0.3.0 || ^0.2.1-rc.0",
+    "@deepseek-ai/dsh-typert-protocol": "^0.1.0-rc.7 || ^0.2.0-rc.1 || ^0.2.1-rc.0"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
+  "scripts": {
+    "check": "node --check index.js && node --check client.js && node --check typert.host.js && node --check stats-core.mjs && node --check store.mjs && node --check quota.js",
+    "smoke": "node scripts/smoke-store.mjs",
+    "smoke:quota": "node scripts/smoke-quota.mjs",
+    "smoke:robust": "node scripts/smoke-robust-host.mjs && node scripts/smoke-robust-client.mjs",
+    "smoke:typert": "node scripts/smoke-typert.mjs",
+    "smoke:compat": "node scripts/smoke-compat.mjs",
+    "test:stats": "node --test scripts/stats-regression.test.mjs",
+    "e2e": "npm run check && npm test && npm run test:stats && npm run smoke && npm run smoke:quota && npm run smoke:robust && npm run smoke:typert && npm run smoke:compat && node scripts/repro-client-mount.mjs && node scripts/repro-strict-dispatch.mjs && node scripts/repro-profile-boot.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "private": true
+}

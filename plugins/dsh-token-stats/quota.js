@@ -1,0 +1,1061 @@
+/** Existing MIT quota integrations retained independently of accounting. */
+import { TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
+const DAY_MS = 86400000;
+/* ======================================================================
+ * Provider quota / balance (套餐余额) — adapted from dsh-musage
+ * (https://github.com/Thedeergod666/dsh-musage, MIT).
+ *
+ * Per provider: resolve the user's already-configured API key through the
+ * DSH `credentials` service (ref naming follows the settings page's
+ * `<ROUTE>_API_KEY` derivation, e.g. minimax-cn → MINIMAX_CN_API_KEY;
+ * deepseek-official ships an explicit apiKeyEnv: DEEPSEEK_API_KEY), GET the
+ * provider's plan/balance endpoint (global fetch first — the host runs on a
+ * modern Node/Electron runtime; curl via the `subprocess` service as the
+ * fallback), parse into a compact `display` payload, and cache per provider
+ * (30 s TTL on success, exponential backoff up to 30 min on failure).
+ * ==================================================================== */
+
+const QUOTA_CACHE_TTL_MS = 30000;
+const QUOTA_BACKOFF_BASE_MS = 5000;
+const QUOTA_BACKOFF_MAX_MS = 30 * 60 * 1000;
+const QUOTA_REQUEST_TIMEOUT_MS = 15000;
+
+const QUOTA_PROVIDERS = {
+  minimax: {
+    refs: ["MINIMAX_CN_API_KEY", "MINIMAX_EN_API_KEY", "MINIMAX_API_KEY"],
+    urls: {
+      MINIMAX_CN_API_KEY: "https://api.minimaxi.com/v1/api/openplatform/coding_plan/remains",
+      MINIMAX_EN_API_KEY: "https://api.minimax.io/v1/api/openplatform/coding_plan/remains",
+      MINIMAX_API_KEY: "https://api.minimaxi.com/v1/api/openplatform/coding_plan/remains",
+    },
+    parse: parseMinimaxResponse,
+  },
+  deepseek: {
+    refs: ["DEEPSEEK_API_KEY", "DEEPSEEK_OFFICIAL_API_KEY"],
+    urls: {
+      DEEPSEEK_API_KEY: "https://api.deepseek.com/user/balance",
+      DEEPSEEK_OFFICIAL_API_KEY: "https://api.deepseek.com/user/balance",
+    },
+    parse: parseDeepseekBalance,
+  },
+  kimi: {
+    refs: ["KIMI_CODING_API_KEY", "KIMI_API_KEY"],
+    urls: {
+      KIMI_CODING_API_KEY: "https://api.kimi.com/coding/v1/usages",
+      KIMI_API_KEY: "https://api.kimi.com/coding/v1/usages",
+    },
+    parse: parseKimiResponse,
+  },
+  openrouter: {
+    refs: ["OPENROUTER_API_KEY"],
+    urls: {
+      OPENROUTER_API_KEY: "https://openrouter.ai/api/v1/credits",
+    },
+    parse: parseOpenrouterResponse,
+  },
+  zhipu: {
+    refs: ["ZAI_CODING_CN_API_KEY", "ZHIPU_API_KEY"],
+    urls: {
+      ZAI_CODING_CN_API_KEY: "https://open.bigmodel.cn/api/monitor/usage/quota/limit",
+      ZHIPU_API_KEY: "https://open.bigmodel.cn/api/monitor/usage/quota/limit",
+    },
+    parse: parseZhipuResponse,
+    // 智谱特殊: Authorization 不加 "Bearer " 前缀 (来自 Musage zhipu.rs 注释)
+    authStyle: "raw",
+  },
+  // Xiaomi MiMo Token Plan — **零凭据可用**（v1.7.0 起重写）。
+  //
+  // 实测（2026-09，scripts/probe-mimo.mjs / probe-mimo-nocookie.mjs）：
+  //  · token-plan-{cn,sgp,ams} 与 api. 主机**只有 OpenAI 兼容的 /v1 推理 API**，
+  //    `/v1/user/balance`、`/api/v1/tokenPlan/usage`、`/api/v1/user/usage` 全部
+  //    404 —— MiMo 没有给 API Key 开任何配额接口。
+  //  · key 与区域强绑定（CN key 在 sgp/ams/api 一律 401 invalid_key），所以也不
+  //    能"换主机重试"。
+  //  · 唯一存在的配额接口是 platform dashboard 的 `/api/v1/user/usage`
+  //    （`{percent, resetDate}`，percent = **剩余**百分比；也是 MiMo 桌面端
+  //    IPC `mimo:getUserUsage` 的同一条链路），但它只认小米账号会话 Cookie。
+  //    拿 tp- key 冒充 serviceToken / X-Service-Token / ?apiKey= 全部 401。
+  //  → v1.6.0 用户看到的 401 正是"把 API Key 打了只认 Cookie 的 dashboard"，
+  //    与 key 是否有效无关。
+  //
+  // 因此不再使用 API Key 读配额（`apiKeyRefs` 已移除）：默认走**本地用量**
+  // （本插件已有的会话日志聚合，零凭据、零过期），配置了 Cookie 时自动升级为
+  // 官方「剩余用量 % + 周重置」，Cookie 失效则静默退回本地读数。
+  mimo: {
+    // dashboard 会话 Cookie（唯一能拿到官方套餐 % 的凭据）
+    cookieRefs: ["XIAOMI_MIMO_COOKIE", "XIAOMI_TOKEN_PLAN_CN_COOKIE", "MIMO_COOKIE"],
+    parse: parseMimoResponse,
+  },
+};
+
+/** Xiaomi MiMo 常量 —— 唯一可用的配额接口在 dashboard，且只认账号会话 Cookie。
+ *  协议来源：MiMo 桌面端 IPC `mimo:getUserUsage`（逆向记录见
+ *  https://github.com/ethanweave/mimo-composer-token-status/blob/main/docs/INVESTIGATION.md）、
+ *  CodexBar docs/mimo.md（MIT）、quotas crate mimo.rs（Unlicense）。*/
+const MIMO_PLATFORM = "https://platform.xiaomimimo.com";
+/** 官方桌面端同款：GET {accountBase}/user/usage → { percent(剩余), resetDate }。*/
+const MIMO_USER_USAGE_URL = `${MIMO_PLATFORM}/api/v1/user/usage`;
+/** 旧版套餐明细端点（保留兜底：部分账号只有它给数；已用比例 + 重置时间）。*/
+const MIMO_USAGE_URL = `${MIMO_PLATFORM}/api/v1/tokenPlan/usage`;
+const MIMO_DETAIL_URL = `${MIMO_PLATFORM}/api/v1/tokenPlan/detail`;
+/** dashboard 必需 Cookie 名（CodexBar docs/mimo.md）：缺失就给明确指引。 */
+const MIMO_COOKIE_REQUIRED = ["api-platform_serviceToken", "userId"];
+/** dashboard admin API 需要的额外请求头（quotas crate mimo.rs 用 accept-language: en）。*/
+const MIMO_PLATFORM_HEADERS = { "accept-language": "en" };
+
+/** `"a=1; b=2"` → Map{name: value}（容忍空格、容忍值里有 `=`）。 */
+function cookieStringToMap(s) {
+  const out = new Map();
+  for (const part of String(s || "").split(";")) {
+    const i = part.indexOf("=");
+    if (i <= 0) continue;
+    out.set(part.slice(0, i).trim(), part.slice(i + 1).trim());
+  }
+  return out;
+}
+
+/** Map → `"a=1; b=2"`。 */
+function cookieMapToString(m) {
+  return [...m].map(([k, v]) => k + "=" + v).join("; ");
+}
+
+function quotaBackoffMs(streak) {
+  if (streak <= 0) return 0;
+  return Math.min(QUOTA_BACKOFF_MAX_MS, QUOTA_BACKOFF_BASE_MS * Math.pow(2, streak - 1));
+}
+
+function parseEndTime(v) {
+  if (typeof v !== "number") return null;
+  if (v >= 1e12 && v <= 4e12) return v;
+  return Date.now() + v * 1000;
+}
+
+// ----- minimax parser (2026-06-01 起 percent-based / count-based 双 schema) -----
+
+function parseMinimaxResponse(body) {
+  let json;
+  try {
+    json = typeof body === "string" ? JSON.parse(body) : body;
+  } catch {
+    return { ok: false, kind: "parse", message: "JSON 解析失败" };
+  }
+  const baseResp = json && json.base_resp;
+  if (!baseResp || baseResp.status_code !== 0) {
+    return {
+      ok: false,
+      kind: "server_error",
+      message: (baseResp && baseResp.status_msg) || "API 返回 base_resp.status_code != 0",
+    };
+  }
+  const arr = json && json.model_remains;
+  if (!Array.isArray(arr) || arr.length === 0) {
+    return { ok: false, kind: "parse", message: "model_remains 为空" };
+  }
+  const entry = arr.find((r) => r && r.model_name === "general") || arr[0];
+  if (!entry) return { ok: false, kind: "parse", message: "找不到可用 model_remains 条目" };
+
+  const fiveHour = parseMinimaxWindow(entry, "current_interval_", "current_interval_usage_count", "current_interval_total_count", "end_time");
+  const weekly = parseMinimaxWindow(entry, "current_weekly_", "current_weekly_usage_count", "current_weekly_total_count", "weekly_end_time");
+
+  if (!fiveHour && !weekly) {
+    return { ok: false, kind: "schema_unknown", message: "MiniMax 响应字段都不认识" };
+  }
+  return {
+    ok: true,
+    provider: "minimax",
+    display: {
+      fiveHrPct: fiveHour ? Math.max(0, Math.min(100, Math.round(fiveHour.usedPercent))) : null,
+      weeklyPct: weekly ? Math.max(0, Math.min(100, Math.round(weekly.usedPercent))) : null,
+      fiveHrResetsIn: fiveHour ? formatResetsIn(fiveHour.resetsAt) : null,
+      weeklyResetsIn: weekly ? formatResetsIn(weekly.resetsAt) : null,
+    },
+  };
+}
+
+function parseMinimaxWindow(entry, prefix, legacyRemaining, legacyTotal, endTimeKey) {
+  const newPercent = entry[prefix + "remaining_percent"];
+  const newStatus = entry[prefix + "status"];
+  if (typeof newPercent === "number" && newStatus === 1) {
+    return {
+      usedPercent: Math.max(0, 100 - newPercent),
+      resetsAt: parseEndTime(entry[endTimeKey]),
+    };
+  }
+  const total = entry[prefix + "total_count"];
+  const remaining = entry[legacyRemaining] || entry[prefix + "usage_count"];
+  if (typeof total === "number" && total > 0 && typeof remaining === "number") {
+    return {
+      usedPercent: Math.max(0, ((total - remaining) / total) * 100),
+      resetsAt: parseEndTime(entry[endTimeKey]),
+    };
+  }
+  return null;
+}
+
+// ----- deepseek balance parser -----
+//   { "is_available": true,
+//     "balance_infos": [ { "currency": "CNY", "total_balance": "43.97",
+//                            "granted_balance": "0.00", "topped_up_balance": "43.97" } ] }
+
+function parseDeepseekBalance(body) {
+  let json;
+  try {
+    json = typeof body === "string" ? JSON.parse(body) : body;
+  } catch {
+    return { ok: false, kind: "parse", message: "JSON 解析失败" };
+  }
+  if (!json || typeof json !== "object") {
+    return { ok: false, kind: "parse", message: "DeepSeek 响应不是对象" };
+  }
+  if (json.is_available === false) {
+    return { ok: false, kind: "server_error", message: "DeepSeek 账号 is_available=false" };
+  }
+  const infos = json.balance_infos;
+  if (!Array.isArray(infos) || infos.length === 0) {
+    return { ok: false, kind: "parse", message: "balance_infos 字段为空" };
+  }
+  const first = infos[0];
+  const totalStr = first && first.total_balance;
+  if (typeof totalStr !== "string" && typeof totalStr !== "number") {
+    return { ok: false, kind: "parse", message: "balance_infos[0].total_balance 不存在" };
+  }
+  const balance = parseFloat(totalStr);
+  if (!isFinite(balance)) {
+    return { ok: false, kind: "parse", message: "balance 解析成数字失败: " + totalStr };
+  }
+  const currency = (first && first.currency) || "USD";
+  return {
+    ok: true,
+    provider: "deepseek",
+    currency,
+    display: {
+      balanceUsd: balance,
+      balanceText: formatBalance(balance, currency),
+    },
+  };
+}
+
+// ----- kimi parser (5h 窗口 + 7d 窗口) -----
+//   { "limits": [ { "detail": { "limit": 100, "remaining": 72, "resetTime": "..." } } ],
+//     "usage": { "limit": 1000, "remaining": 742, "resetTime": 1749840000 } }
+
+function parseKimiResponse(body) {
+  let json;
+  try {
+    json = typeof body === "string" ? JSON.parse(body) : body;
+  } catch {
+    return { ok: false, kind: "parse", message: "JSON 解析失败" };
+  }
+  if (!json || typeof json !== "object") {
+    return { ok: false, kind: "parse", message: "Kimi 响应不是对象" };
+  }
+  if (json.code && json.code !== 200 && json.code !== "200") {
+    return { ok: false, kind: "server_error", message: "Kimi 返错: " + (json.code || "?") + " · " + (json.msg || "") };
+  }
+  const firstLimit = Array.isArray(json.limits) && json.limits[0] && json.limits[0].detail;
+  const five = firstLimit || {};
+  const fiveHrLimit = Number(five.limit) || 0;
+  const fiveHrRemaining = Number(five.remaining) || 0;
+  const fiveHrResetsAt = parseKimiResetTime(five.resetTime);
+  const week = json.usage || {};
+  const weeklyLimit = Number(week.limit) || 0;
+  const weeklyRemaining = Number(week.remaining) || 0;
+  const weeklyResetsAt = parseKimiResetTime(week.resetTime);
+  if (!fiveHrLimit && !weeklyLimit) {
+    return { ok: false, kind: "parse", message: "Kimi 响应没有 5h/7d 限额" };
+  }
+  return {
+    ok: true,
+    provider: "kimi",
+    display: {
+      fiveHrPct: fiveHrLimit > 0 ? Math.round(((fiveHrLimit - fiveHrRemaining) / fiveHrLimit) * 100) : null,
+      weeklyPct: weeklyLimit > 0 ? Math.round(((weeklyLimit - weeklyRemaining) / weeklyLimit) * 100) : null,
+      fiveHrResetsIn: fiveHrResetsAt ? formatResetsIn(fiveHrResetsAt) : null,
+      weeklyResetsIn: weeklyResetsAt ? formatResetsIn(weeklyResetsAt) : null,
+    },
+  };
+}
+
+function parseKimiResetTime(v) {
+  if (typeof v === "number") {
+    if (v >= 1e12 && v <= 4e12) return v;
+    if (v > 1e9) return v * 1000;
+    return null;
+  }
+  if (typeof v === "string" && v.length > 0) {
+    const t = Date.parse(v);
+    return isNaN(t) ? null : t;
+  }
+  return null;
+}
+
+// ----- openrouter parser (total_credits - total_usage) -----
+
+function parseOpenrouterResponse(body) {
+  let json;
+  try {
+    json = typeof body === "string" ? JSON.parse(body) : body;
+  } catch {
+    return { ok: false, kind: "parse", message: "JSON 解析失败" };
+  }
+  if (!json || typeof json !== "object") {
+    return { ok: false, kind: "parse", message: "OpenRouter 响应不是对象" };
+  }
+  const data = json.data;
+  if (!data || typeof data !== "object") {
+    return { ok: false, kind: "parse", message: "data 字段缺失" };
+  }
+  const total = Number(data.total_credits);
+  const used = Number(data.total_usage);
+  if (!isFinite(total) || !isFinite(used)) {
+    return { ok: false, kind: "parse", message: "total_credits / total_usage 不是数字" };
+  }
+  const remaining = total - used;
+  return {
+    ok: true,
+    provider: "openrouter",
+    currency: "USD",
+    display: {
+      balanceUsd: remaining,
+      balanceText: formatBalance(remaining, "USD"),
+    },
+  };
+}
+
+// ----- zhipu (智谱 GLM Coding Plan) parser -----
+//   { "code": 200, "success": true,
+//     "data": { "limits": [ { "type": "CREDIT_LIMIT", "unit": 3, "usage": 2000,
+//                "remaining": 0, "percentage": 100, "nextResetTime": 1786969101067 }, ... ] } }
+// unit=3 是 5h 窗口, unit=6 是周窗口. percentage 直接是已用 0-100 (服务器算好).
+
+function parseZhipuResponse(body) {
+  let json;
+  try {
+    json = typeof body === "string" ? JSON.parse(body) : body;
+  } catch {
+    return { ok: false, kind: "parse", message: "JSON 解析失败" };
+  }
+  if (!json || typeof json !== "object") {
+    return { ok: false, kind: "parse", message: "智谱响应不是对象" };
+  }
+  if (json.success === false) {
+    return { ok: false, kind: "server_error", message: "智谱 success=false · " + (json.msg || "") };
+  }
+  const data = json.data;
+  if (!data || !Array.isArray(data.limits)) {
+    return { ok: false, kind: "parse", message: "data.limits 缺失" };
+  }
+  const fiveHr = data.limits.find((l) => l && (l.unit === 3 || l.unit === "3"));
+  const weekly = data.limits.find((l) => l && (l.unit === 6 || l.unit === "6"));
+  if (!fiveHr && !weekly) {
+    return { ok: false, kind: "parse", message: "找不到 unit=3 (5h) 或 unit=6 (周) 的 limit" };
+  }
+  function pickWindow(w) {
+    if (!w) return null;
+    const limit = Number(w.usage) || 0;
+    const remaining = Number(w.remaining) || 0;
+    const pct = typeof w.percentage === "number" ? w.percentage : limit > 0 ? Math.round(((limit - remaining) / limit) * 100) : null;
+    const resetsAt = parseEndTime(w.nextResetTime);
+    return { usedPercent: pct, resetsAt };
+  }
+  const f = pickWindow(fiveHr);
+  const w = pickWindow(weekly);
+  return {
+    ok: true,
+    provider: "zhipu",
+    display: {
+      fiveHrPct: f ? f.usedPercent : null,
+      weeklyPct: w ? w.usedPercent : null,
+      fiveHrResetsIn: f && f.resetsAt ? formatResetsIn(f.resetsAt) : null,
+      weeklyResetsIn: w && w.resetsAt ? formatResetsIn(w.resetsAt) : null,
+    },
+  };
+}
+
+function formatBalance(n, currency) {
+  const symbol = currency === "CNY" ? "¥" : currency === "USD" ? "$" : "";
+  return symbol + (n >= 100 ? n.toFixed(0) : n.toFixed(2));
+}
+
+// ----- xiaomi mimo (小米 MiMo Token Plan) parser -----
+//   { "code": 0,
+//     "data": {
+//       "usage":      { "items": [ {"name":"plan_total_token","percent":0.13}, ... ] },
+//       "monthUsage": { "items": [ {"name":"month_total_token","percent":0.42} ] } } }
+// percent 是 0-1 小数（×100 得百分比）；detail 端给 currentPeriodEnd（UTC 字符串）
+// 与 expired。套餐/总额度相差 <0.5pt 视为同一份额度（去重，对齐 Musage）。
+// 业务 code 40100..40199 等价于 HTTP 401（凭据失效）。
+
+function mimoItemPct(item) {
+  if (!item || typeof item !== "object") return null;
+  if (typeof item.percent === "number" && isFinite(item.percent)) {
+    return Math.max(0, Math.min(100, Math.round(item.percent * 100)));
+  }
+  const used = Number(item.used);
+  const limit = Number(item.limit);
+  if (isFinite(used) && isFinite(limit) && limit > 0) {
+    return Math.max(0, Math.min(100, Math.round((used / limit) * 100)));
+  }
+  return null;
+}
+
+function parseMimoResponse(body, detailBody) {
+  let json;
+  try {
+    json = typeof body === "string" ? JSON.parse(body) : body;
+  } catch {
+    return { ok: false, provider: "mimo", kind: "parse", message: "JSON 解析失败" };
+  }
+  if (!json || typeof json !== "object") {
+    return { ok: false, provider: "mimo", kind: "parse", message: "MiMo 响应不是对象" };
+  }
+  if (typeof json.code === "number" && json.code !== 0) {
+    if (json.code >= 40100 && json.code < 40200) {
+      return {
+        ok: false,
+        provider: "mimo",
+        kind: "auth_failed",
+        message: "MiMo 凭据已失效（API Key 或 Cookie 过期），请到 platform.xiaomimimo.com 续费或重新生成",
+      };
+    }
+    return {
+      ok: false,
+      provider: "mimo",
+      kind: "server_error",
+      message: "MiMo 业务错误 code=" + json.code + " · " + (json.message || ""),
+    };
+  }
+  const data = json.data;
+  if (!data || typeof data !== "object") {
+    return { ok: false, provider: "mimo", kind: "parse", message: "MiMo 响应缺少 data 字段" };
+  }
+
+  let resetsAt = null;
+  let expired = false;
+  if (detailBody) {
+    let detail;
+    try {
+      detail = typeof detailBody === "string" ? JSON.parse(detailBody) : detailBody;
+    } catch {
+      detail = null;
+    }
+    const dd = detail && detail.data;
+    if (dd && typeof dd === "object") {
+      if (dd.expired === true) expired = true;
+      if (typeof dd.currentPeriodEnd === "string" && dd.currentPeriodEnd) {
+        const t = Date.parse(dd.currentPeriodEnd.replace(" ", "T") + "Z");
+        if (!isNaN(t)) resetsAt = t;
+      }
+    }
+  }
+  if (expired) {
+    return {
+      ok: false,
+      provider: "mimo",
+      kind: "plan_expired",
+      message: "MiMo Token 套餐已过期，请到 platform.xiaomimimo.com 续费",
+    };
+  }
+
+  const usageItems = data.usage && Array.isArray(data.usage.items) ? data.usage.items : [];
+  const monthItems = data.monthUsage && Array.isArray(data.monthUsage.items) ? data.monthUsage.items : [];
+  const findPct = (items, name) => {
+    const hit = items.find((it) => it && it.name === name);
+    return hit ? mimoItemPct(hit) : null;
+  };
+  let planPct = findPct(usageItems, "plan_total_token");
+  let monthPct = findPct(monthItems, "month_total_token");
+
+  if (planPct === null && monthPct === null) {
+    if (usageItems.length > 0 || monthItems.length > 0) {
+      const names = usageItems.concat(monthItems).map((it) => it && it.name).filter(Boolean).join(",");
+      return {
+        ok: false,
+        provider: "mimo",
+        kind: "schema_unknown",
+        message: "MiMo 响应字段都不认识（items: " + names + "）",
+      };
+    }
+    return { ok: false, provider: "mimo", kind: "parse", message: "MiMo usage.items 为空（套餐可能已过期）" };
+  }
+  // 套餐与月度总额度是同一份额度时只显示一行（Musage 0.5pt 去重阈值）
+  if (planPct !== null && monthPct !== null && Math.abs(monthPct - planPct) < 0.5) {
+    monthPct = null;
+  }
+  const resetsIn = resetsAt ? formatResetsIn(resetsAt) : null;
+  return {
+    ok: true,
+    provider: "mimo",
+    display: {
+      fiveHrPct: planPct,
+      weeklyPct: monthPct,
+      fiveHrResetsIn: planPct !== null ? resetsIn : null,
+      weeklyResetsIn: monthPct !== null ? resetsIn : null,
+      balanceText: null,
+      balanceUsd: null,
+      currency: null,
+    },
+  };
+}
+
+// ----- xiaomi mimo /api/v1/user/usage parser (v1.7.0，官方桌面端同款链路) -----
+//   { "percent": 78, "resetDate": "2026-09-16" }
+// **percent 是「剩余」百分比**（账户菜单「剩余用量 78%」），与上面
+// tokenPlan/usage 的 items[].percent（**已用**比例）语义相反，别混用。
+// wire 里 fiveHrPct/weeklyPct 一律是「已用 %」，所以取 100 - percent。
+
+function parseMimoUserUsage(body) {
+  let json;
+  try {
+    json = typeof body === "string" ? JSON.parse(body) : body;
+  } catch {
+    return { ok: false, provider: "mimo", kind: "parse", message: "MiMo 响应 JSON 解析失败" };
+  }
+  if (!json || typeof json !== "object") {
+    return { ok: false, provider: "mimo", kind: "parse", message: "MiMo 响应不是对象" };
+  }
+  if (typeof json.code === "number" && json.code !== 0) {
+    if (json.code === 401 || (json.code >= 40100 && json.code < 40200)) {
+      return {
+        ok: false,
+        provider: "mimo",
+        kind: "auth_failed",
+        message: "MiMo Cookie 已失效，请重新登录 platform.xiaomimimo.com 并复制 Cookie 请求头",
+      };
+    }
+    return {
+      ok: false,
+      provider: "mimo",
+      kind: "server_error",
+      message: "MiMo 业务错误 code=" + json.code + " · " + (json.message || ""),
+    };
+  }
+  const data = json.data && typeof json.data === "object" ? json.data : json;
+
+  const raw = Number(data.percent);
+  if (!isFinite(raw)) {
+    return {
+      ok: false,
+      provider: "mimo",
+      kind: "parse",
+      message: "MiMo 响应缺少 percent 字段（keys: " + Object.keys(data).join(",") + "）",
+    };
+  }
+  const remaining = Math.max(0, Math.min(100, Math.round(raw)));
+  const used = 100 - remaining;
+
+  // resetDate 形如 "2026-09-16"（本地日），按当天 23:59:59 解释为到期时刻。
+  let resetsAt = null;
+  if (typeof data.resetDate === "string" && data.resetDate) {
+    const iso = data.resetDate.length <= 10 ? data.resetDate + "T23:59:59" : data.resetDate;
+    const t = Date.parse(iso);
+    if (!isNaN(t)) resetsAt = t;
+  }
+  const resetsIn = resetsAt ? formatResetsIn(resetsAt) : null;
+
+  return {
+    ok: true,
+    provider: "mimo",
+    display: {
+      // 剩余用量是单一窗口（账户菜单标「1 周」），映射到 7d 窗口位
+      weeklyPct: used,
+      weeklyResetsIn: resetsIn,
+      fiveHrPct: null,
+      fiveHrResetsIn: null,
+      balanceText: "剩余 " + remaining + "%",
+      balanceUsd: null,
+      currency: null,
+    },
+  };
+}
+
+/** 12345678 → "12.3M"（读数行/卡片用的紧凑 token 计数）。 */
+function formatTokenCount(n) {
+  if (!isFinite(n) || n <= 0) return "0";
+  if (n >= 1e9) return (n / 1e9).toFixed(n >= 1e10 ? 0 : 1) + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + "K";
+  return String(Math.round(n));
+}
+
+function formatResetsIn(resetsAtMs) {
+  if (typeof resetsAtMs !== "number" || !resetsAtMs) return "";
+  const ms = resetsAtMs - Date.now();
+  if (ms <= 0) return "即将重置";
+  const totalMin = Math.floor(ms / 60000);
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h > 0) return h + "h" + m + "m 后重置";
+  return m + "m 后重置";
+}
+
+function classifyQuotaHttpStatus(status) {
+  if (status === 429) return "rate_limited";
+  if (status === 401 || status === 403) return "auth_failed";
+  return "server_error";
+}
+
+function parseCurlOutput(rawText) {
+  if (typeof rawText !== "string") return { body: "", statusCode: 0 };
+  const lastNl = rawText.lastIndexOf("\n");
+  if (lastNl < 0) return { body: rawText, statusCode: 0 };
+  const body = rawText.slice(0, lastNl);
+  const statusCode = parseInt(rawText.slice(lastNl + 1).trim(), 10);
+  if (isNaN(statusCode)) return { body: rawText, statusCode: 0 };
+  return { body, statusCode };
+}
+
+/** Trim a parser result to the exact wire shape declared in typert.host.js. */
+function quotaWireValue(parsed) {
+  if (!parsed || parsed.ok !== true) {
+    return {
+      ok: false,
+      provider: (parsed && parsed.provider) || "",
+      kind: (parsed && parsed.kind) || "other",
+      message: (parsed && parsed.message) || "未知错误",
+    };
+  }
+  const d = parsed.display || {};
+  return {
+    ok: true,
+    provider: parsed.provider,
+    display: {
+      fiveHrPct: typeof d.fiveHrPct === "number" && isFinite(d.fiveHrPct) ? d.fiveHrPct : null,
+      weeklyPct: typeof d.weeklyPct === "number" && isFinite(d.weeklyPct) ? d.weeklyPct : null,
+      fiveHrResetsIn: typeof d.fiveHrResetsIn === "string" && d.fiveHrResetsIn ? d.fiveHrResetsIn : null,
+      weeklyResetsIn: typeof d.weeklyResetsIn === "string" && d.weeklyResetsIn ? d.weeklyResetsIn : null,
+      balanceText: typeof d.balanceText === "string" && d.balanceText ? d.balanceText : null,
+      balanceUsd: typeof d.balanceUsd === "number" && isFinite(d.balanceUsd) ? d.balanceUsd : null,
+      currency: typeof parsed.currency === "string" ? parsed.currency : null,
+    },
+  };
+}
+
+export class QuotaService extends TypertRemoteService {
+ constructor(ctx, config) { super(ctx, "tokenStats"); }
+  // ---- quota / balance (套餐余额) --------------------------------------------
+
+  /**
+   * Resolve the API key for one provider through the DSH credentials seam.
+   * Ref candidates follow the settings page's `<ROUTE>_API_KEY` derivation and
+   * each provider's shipped default `apiKeyEnv`; without the credentials
+   * service (headless deployment) the process environment is consulted.
+   */
+  /**
+   * Resolve credentials for one provider through the DSH credentials seam.
+   * Ref candidates follow the settings page's `<ROUTE>_API_KEY` derivation and
+   * each provider's shipped default `apiKeyEnv`; without the credentials
+   * service (headless deployment) the process environment is consulted.
+   *
+   * v1.6.0 起，mimo 同时持有 API Key (Bearer) + Cookie (dashboard session) 两类
+   * 凭据；其他 provider 只用 API Key。返回值总是
+   *   { apiKey, apiKeyRef, cookie, cookieRef }，
+   * 未配置那一路为 null。`_quotaActiveRef[provider + ":api" | ":cookie"]` 按
+   * provider+kind 缓存上次命中的 ref（保持粘性，但不互锁）。
+   */
+  async _quotaApiKey(provider) {
+    const cfg = QUOTA_PROVIDERS[provider];
+    if (!cfg) return { apiKey: null, apiKeyRef: null, cookie: null, cookieRef: null };
+    const credentials = this.ctx.get("credentials");
+    // 兼容新旧两种配置形态：新的是 {apiKeyRefs, cookieRefs}，旧的是单数组 refs。
+    const apiKeyRefList = cfg.apiKeyRefs || cfg.refs || [];
+    const cookieRefList = cfg.cookieRefs || [];
+
+    const resolveOne = async (ref) => {
+      try {
+        if (credentials && typeof credentials.resolve === "function") {
+          const hit = await credentials.resolve(ref);
+          if (hit && hit.value) return hit.value;
+        } else if (typeof process !== "undefined" && process.env && process.env[ref]) {
+          return process.env[ref];
+        }
+      } catch (e) {
+        /* try the next ref */
+      }
+      return null;
+    };
+
+    const resolveList = async (refList, activeKey) => {
+      const active = this._quotaActiveRef[activeKey];
+      const candidates = active
+        ? [active, ...refList.filter((r) => r !== active)]
+        : refList;
+      for (const ref of candidates) {
+        const v = await resolveOne(ref);
+        if (v) {
+          this._quotaActiveRef[activeKey] = ref;
+          return { ref, value: v };
+        }
+      }
+      return { ref: null, value: null };
+    };
+
+    const api = await resolveList(apiKeyRefList, provider + ":api");
+    const ck = await resolveList(cookieRefList, provider + ":cookie");
+    return {
+      apiKey: api.value,
+      apiKeyRef: api.ref,
+      cookie: ck.value,
+      cookieRef: ck.ref,
+    };
+  }
+
+  async _resolveCurl() {
+    if (this._curlPath) return this._curlPath;
+    const subprocess = this.ctx.get("subprocess");
+    if (!subprocess || typeof subprocess.resolveExecutable !== "function") {
+      throw new Error("subprocess service 不可用, 且宿主无全局 fetch");
+    }
+    this._curlPath = await subprocess.resolveExecutable("curl");
+    return this._curlPath;
+  }
+
+  /** curl fallback for hosts without a global fetch (same shape as musage). */
+  async _curlGet(url, key, authStyle, extraHeaders) {
+    const subprocess = this.ctx.get("subprocess");
+    if (!subprocess || typeof subprocess.spawn !== "function") {
+      return { ok: false, kind: "network", message: "subprocess service 不可用, 且宿主无全局 fetch" };
+    }
+    const c = await this._resolveCurl();
+    const authHeader =
+      authStyle === "raw"
+        ? "Authorization: " + key
+        : authStyle === "cookie"
+          ? "Cookie: " + key
+          : "Authorization: Bearer " + key;
+    const argv = [
+      c, "-sS",
+      "--max-time", String(Math.floor(QUOTA_REQUEST_TIMEOUT_MS / 1000)),
+      "-w", "\n%{http_code}",
+      "-H", authHeader,
+      "-H", "Accept: application/json",
+    ];
+    for (const [name, value] of Object.entries(extraHeaders || {})) {
+      argv.push("-H", name + ": " + value);
+    }
+    argv.push(url);
+    const handle = subprocess.spawn({
+      argv,
+      cwd: "/",
+      stdio: {
+        stdin: "ignore",
+        stdout: { maxBytes: 8 * 1024 * 1024 },
+        stderr: { maxBytes: 64 * 1024 },
+      },
+      graceMs: QUOTA_REQUEST_TIMEOUT_MS,
+    });
+    const outcome = await handle.done;
+    const stdout = handle.collected && handle.collected.stdout
+      ? handle.collected.stdout.readFrom(0)
+      : { text: "" };
+    const stderr = handle.collected && handle.collected.stderr
+      ? handle.collected.stderr.readFrom(0)
+      : { text: "" };
+    if (outcome.exitCode !== 0) {
+      return { ok: false, kind: "network", message: "curl 退出 " + outcome.exitCode + " · " + stderr.text.slice(0, 200) };
+    }
+    const { body, statusCode } = parseCurlOutput(stdout.text);
+    if (statusCode === 0) {
+      return { ok: false, kind: "network", message: "curl 输出没拿到 HTTP 状态: " + stdout.text.slice(0, 200) };
+    }
+    if (statusCode !== 200) {
+      return {
+        ok: false,
+        kind: classifyQuotaHttpStatus(statusCode),
+        httpStatus: statusCode,
+        message: "HTTP " + statusCode + " · " + body.slice(0, 200),
+      };
+    }
+    return { ok: true, body };
+  }
+
+  /** GET one provider endpoint with its API key; fetch first, curl fallback.
+   *  `extraHeaders` carries provider-specific headers (e.g. MiMo dashboard 的
+   *  accept-language: en)，fetch 与 curl 两条路径都要带上。 */
+  async _httpGet(url, key, authStyle, extraHeaders) {
+    if (typeof fetch === "function") {
+      try {
+        const headers = { accept: "application/json", ...(extraHeaders || {}) };
+        // authStyle: undefined → Bearer； "raw" → 原样 Authorization（智谱）；
+        // "cookie" → 整串 Cookie 头（小米 MiMo dashboard admin API）。
+        if (authStyle === "cookie") headers.cookie = key;
+        else headers.authorization = authStyle === "raw" ? key : "Bearer " + key;
+        const res = await fetch(url, {
+          method: "GET",
+          headers,
+          signal: AbortSignal.timeout(QUOTA_REQUEST_TIMEOUT_MS),
+        });
+        const body = await res.text();
+        // 带回 Set-Cookie：mimo 的 cookie jar 靠它接住服务端续发的会话
+        // （浏览器自动存，我们此前每次重发死 cookie，等于放弃了续期）。
+        const setCookie = typeof res.headers.getSetCookie === "function" ? res.headers.getSetCookie() : [];
+        if (res.status !== 200) {
+          return {
+            ok: false,
+            kind: classifyQuotaHttpStatus(res.status),
+            httpStatus: res.status,
+            setCookie,
+            message: "HTTP " + res.status + " · " + body.slice(0, 200),
+          };
+        }
+        return { ok: true, body, setCookie };
+      } catch (e) {
+        return { ok: false, kind: "network", message: "fetch 失败: " + String((e && e.message) || e) };
+      }
+    }
+    // curl 回退路径不带 Set-Cookie（无法维持会话续期，仅影响 mimo 的 cookie 升级）。
+    return this._curlGet(url, key, authStyle, extraHeaders);
+  }
+
+  async _fetchProviderQuota(provider) {
+    const cfg = QUOTA_PROVIDERS[provider];
+    if (!cfg) {
+      return { ok: false, provider, kind: "other", message: "未知 provider: " + provider };
+    }
+    const { apiKey, apiKeyRef, cookie, cookieRef } = await this._quotaApiKey(provider);
+    if (provider === "mimo") return this._fetchMimoQuota(apiKey, apiKeyRef, cookie, cookieRef);
+    if (!apiKey) {
+      return {
+        ok: false,
+        provider,
+        kind: "unconfigured",
+        message: "未配置 " + provider + " API Key (在 DSH 模型设置里配置对应 provider)",
+      };
+    }
+    const refList = cfg.apiKeyRefs || cfg.refs || [];
+    const url = cfg.urls[apiKeyRef] || cfg.urls[refList[0]];
+    const raw = await this._httpGet(url, apiKey, cfg.authStyle);
+    if (!raw.ok) return { ...raw, provider };
+    return cfg.parse(raw.body);
+  }
+
+  /**
+   * MiMo 本地用量（零凭据、零过期）：从会话日志聚合里筛出 MiMo 模型，
+   * 算「今日 / 近 7 天（含今天）」消耗 token。provider 判定与 client 的
+   * PROVIDER_ALIASES 同一套包含回退（route id 用户自由命名）。
+   */
+  _mimoLocalUsage() {
+    const isMimo = (meta, key) => {
+      const p = String((meta && meta.provider) || "").toLowerCase();
+      if (p) return p.includes("mimo") || p.includes("xiaomi");
+      const n = String((meta && meta.name) || key || "").toLowerCase();
+      return n.includes("mimo");
+    };
+    const now = Date.now();
+    const todayKey = this._dayKeyOf(now);
+    const weekCut = this._dayKeyOf(now - 6 * DAY_MS);
+    let today = 0;
+    let week = 0;
+    for (const [dk, day] of this._byDay) {
+      if (dk > todayKey) continue;
+      let dayTotal = 0;
+      for (const [key, rec] of day) {
+        const meta = this._modelMeta.get(key);
+        if (!isMimo(meta, key)) continue;
+        dayTotal += rec.total || 0;
+      }
+      if (dk === todayKey) today = dayTotal;
+      if (dk >= weekCut) week += dayTotal;
+    }
+    return { today, week };
+  }
+
+  /**
+   * 最小 cookie jar：把响应 `Set-Cookie` 里属于 MiMo 的条目吸收进当前 cookie 串，
+   * 并写回 DSH 凭据库，使服务端续发的会话能跨轮询、跨重启生效。
+   *
+   * 只吸收两类名字：jar 里已存在的（续期/轮换同一条 cookie），以及 MiMo 已知的那几个
+   * （防止服务端塞进无关 cookie 污染用户粘贴的内容）。没有变化则不写盘。
+   *
+   * @returns {Promise<string|null>} 合并后的新 cookie 串；无变化返回 null。
+   */
+  async _absorbMimoCookie(cookieRef, current, setCookieHeaders) {
+    if (!Array.isArray(setCookieHeaders) || setCookieHeaders.length === 0) return null;
+    const jar = cookieStringToMap(current);
+    const known = new Set([...MIMO_COOKIE_REQUIRED, "api-platform_ph", "api-platform_slh"]);
+    let changed = false;
+    for (const raw of setCookieHeaders) {
+      // 只取第一段 `name=value`，后面的 Path/HttpOnly/Expires 是属性不是 cookie
+      const pair = String(raw).split(";")[0];
+      const i = pair.indexOf("=");
+      if (i <= 0) continue;
+      const name = pair.slice(0, i).trim();
+      if (!name) continue;
+      if (!jar.has(name) && !known.has(name)) continue;
+      const value = pair.slice(i + 1).trim();
+      // 浏览器语义：空值或 Max-Age=0 表示**删除**该 cookie，不是把它置空
+      // （置空会发出 `api-platform_serviceToken=`，等于带着坏 cookie 去请求）。
+      if (value === "" || /;\s*max-age\s*=\s*0/i.test(raw)) {
+        if (jar.delete(name)) changed = true;
+        continue;
+      }
+      if (jar.get(name) === value) continue;
+      jar.set(name, value);
+      changed = true;
+    }
+    if (!changed) return null;
+    const next = cookieMapToString(jar);
+    const credentials = this.ctx.get("credentials");
+    // 服务端把会话 cookie 全清掉了 = 会话没了：删掉凭据比留个空串更贴近浏览器，
+    // 下一轮会自然退回本地用量，而不是带着空 cookie 反复 401。
+    if (!next) {
+      try {
+        if (cookieRef && credentials && typeof credentials.unset === "function") {
+          await credentials.unset(cookieRef);
+        }
+      } catch {
+        /* 写回失败不影响本次读数 */
+      }
+      return null;
+    }
+    // 写回官方凭据库（宿主侧 credentials.set）；失败只影响跨重启续期，本进程内
+    // 仍用 next 继续请求，所以吞掉异常。
+    try {
+      if (cookieRef && credentials && typeof credentials.set === "function") {
+        await credentials.set(cookieRef, next);
+      }
+    } catch {
+      /* 写回失败不影响本次读数 */
+    }
+    return next;
+  }
+
+  /** MiMo 读数（v1.7.0）：官方 Cookie 优先，失败静默退回本地用量。 */
+  async _fetchMimoQuota(_apiKey, _apiKeyRef, cookie, cookieRef) {
+    if (cookie) {
+      const official = await this._fetchMimoOfficial(cookie, cookieRef);
+      if (official.ok) return official;
+      // Cookie 失效（auth_failed）→ 不打扰用户，静默退回本地用量。
+      // 其余（套餐过期 / 解析失败 / 限流 / 5xx）都是真实状态，如实上报。
+      if (official.kind !== "auth_failed") return official;
+    }
+    const local = this._mimoLocalUsage();
+    return {
+      ok: true,
+      provider: "mimo",
+      display: {
+        fiveHrPct: null,
+        weeklyPct: null,
+        fiveHrResetsIn: null,
+        weeklyResetsIn: null,
+        balanceText: "今日 " + formatTokenCount(local.today) + " · 7d " + formatTokenCount(local.week),
+        balanceUsd: null,
+        currency: null,
+      },
+    };
+  }
+
+  /**
+   * 官方 dashboard 配额（仅 Cookie）：主用桌面端同款 `/api/v1/user/usage`
+   * （percent=剩余 + resetDate），失败再退到旧版 `/api/v1/tokenPlan/usage`
+   * + `/detail`（已用比例）。两条都不通 = Cookie 失效。
+   */
+  async _fetchMimoOfficial(cookie, cookieRef) {
+    const missing = MIMO_COOKIE_REQUIRED.filter((n) => cookie.indexOf(n) < 0);
+    if (missing.length === MIMO_COOKIE_REQUIRED.length) {
+      return {
+        ok: false,
+        provider: "mimo",
+        kind: "auth_failed",
+        message:
+          "MiMo Cookie 缺少 " + MIMO_COOKIE_REQUIRED.join(" / ") +
+          "：登录 platform.xiaomimimo.com 后从开发者工具复制完整 Cookie 请求头",
+      };
+    }
+
+    // 每个响应后立刻吸收 Set-Cookie：服务端续发的会话要马上用于后续请求
+    // （browser jar 的等价行为），否则同一轮里还在用旧 token。
+    const jar = async (res) => {
+      const next = await this._absorbMimoCookie(cookieRef, cookie, res && res.setCookie);
+      if (next) cookie = next;
+      return res;
+    };
+
+    const user = await jar(await this._httpGet(MIMO_USER_USAGE_URL, cookie, "cookie", MIMO_PLATFORM_HEADERS));
+    if (user.ok) {
+      const parsed = parseMimoUserUsage(user.body);
+      if (parsed.ok) return parsed;
+      // 业务码 401 = 会话已死，不用再试旧端点。
+      if (parsed.kind === "auth_failed") return parsed;
+    } else if (user.httpStatus === 401 || user.httpStatus === 403) {
+      return { ...user, provider: "mimo" };
+    } else if (user.kind === "rate_limited" || (user.httpStatus >= 500 && user.httpStatus < 600)) {
+      return { ...user, provider: "mimo" };
+    }
+    // 404（该账号没有这个端点）或其它 → 退到旧版 tokenPlan/usage + detail。
+    // detail 必须先拉（expired 标记 + 重置时间要在 usage 解析前拿到）。
+    const detail = await jar(await this._httpGet(MIMO_DETAIL_URL, cookie, "cookie", MIMO_PLATFORM_HEADERS));
+    const usage = await jar(await this._httpGet(MIMO_USAGE_URL, cookie, "cookie", MIMO_PLATFORM_HEADERS));
+    if (usage.ok) {
+      const parsed = parseMimoResponse(usage.body, detail.ok ? detail.body : null);
+      // plan_expired / schema_unknown / parse 都是"拿到了但内容不对"，如实上报；
+      // 只有 auth_failed 才继续降级。
+      if (parsed.ok || parsed.kind !== "auth_failed") return parsed;
+    }
+    return {
+      ok: false,
+      provider: "mimo",
+      kind: "auth_failed",
+      message:
+        "MiMo Cookie 已失效（" + MIMO_USER_USAGE_URL.replace("https://", "") +
+        " 返回 " + (user.httpStatus || "异常") + "）：重新登录 platform.xiaomimimo.com 后复制 Cookie",
+    };
+  }
+
+  /**
+   * Cached per-provider quota read. Success caches for 30 s; failures cache
+   * with exponential backoff (5 s → 30 min cap) so a broken provider is not
+   * hammered. `force` drops the cached entry before reading (手动刷新).
+   */
+  async _getQuotaCached(provider, force) {
+    if (force) this._quotaCache[provider] = null;
+    const c = this._quotaCache[provider];
+    if (c && c.expiresAt > Date.now()) return c.value;
+    const value = quotaWireValue(await this._fetchProviderQuota(provider));
+    if (value.ok) {
+      this._quotaCache[provider] = { value, expiresAt: Date.now() + QUOTA_CACHE_TTL_MS, streak: 0 };
+    } else {
+      const streak = (c ? c.streak : 0) + 1;
+      this._quotaCache[provider] = { value, expiresAt: Date.now() + quotaBackoffMs(streak), streak };
+    }
+    return value;
+  }
+
+  /**
+   * Plan quota / balance for one provider (`minimax` | `deepseek` | `kimi` |
+   * `openrouter` | `zhipu` | `mimo`). The composer readout in the Client half
+   * calls this for the session's active provider (and on click with force=true).
+   */
+  async getQuota(provider, force) {
+    const p = typeof provider === "string" ? provider : "";
+    if (!QUOTA_PROVIDERS[p]) {
+      return { ok: true, value: { ok: false, provider: p, kind: "other", message: "未知 provider: " + p } };
+    }
+    try {
+      return { ok: true, value: await this._getQuotaCached(p, force === true) };
+    } catch (e) {
+      return { ok: true, value: { ok: false, provider: p, kind: "other", message: String((e && e.message) || e) } };
+    }
+  }
+
+  /**
+   * Quota snapshot for every supported provider at once (设置页余额区块).
+   * Providers are queried in parallel; each entry is the same wire value
+   * getQuota returns. `force` bypasses every provider's cache.
+   */
+  async getAllQuotas(force) {
+    const names = Object.keys(QUOTA_PROVIDERS);
+    const values = await Promise.all(
+      names.map(async (p) => {
+        try {
+          return await this._getQuotaCached(p, force === true);
+        } catch (e) {
+          return quotaWireValue({ ok: false, provider: p, kind: "other", message: String((e && e.message) || e) });
+        }
+      }),
+    );
+    const quotas = {};
+    for (let i = 0; i < names.length; i++) quotas[names[i]] = values[i];
+    return { ok: true, value: { quotas } };
+  }
+}
