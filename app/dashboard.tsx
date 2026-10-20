@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { summarize, dayKey } from "../lib/stats.mjs";
+import { heatScale } from "../lib/heatmap.mjs";
+import { FilterSelect } from "./filter-select";
 import { getTimeTheme } from "../lib/theme.mjs";
 import type { UsageRow } from "../lib/demo";
 import { Icon, type IconName } from "./dashboard-icons";
@@ -120,10 +122,10 @@ export default function Dashboard() {
     });
   }, [year]);
 
-  const peakDay = Math.max(0, ...Object.values(days).map((day) => day.total));
-  const maximum = Math.max(1, peakDay);
-  const level = (value: number) =>
-    !value ? 0 : Math.min(4, Math.max(1, Math.ceil((value / maximum) * 4)));
+  const level = useMemo(
+    () => heatScale(Object.values(days).map((day) => day.total)),
+    [days],
+  );
   const modelList = Object.entries(
     summary.models as Record<string, number>,
   ).sort((a, b) => b[1] - a[1]);
@@ -180,7 +182,7 @@ export default function Dashboard() {
       value: summary.total,
       note:
         summary.requests === null
-          ? "请求数未完整统计"
+          ? String(year) + " 年累计"
           : full(summary.requests) + " 次模型请求",
       icon: "model",
       unit: "tokens",
@@ -209,21 +211,19 @@ export default function Dashboard() {
               caption="TOKEN ACTIVITY"
               id="activity-title"
             />
-            <label className="year-picker">
-              <span className="sr-only">统计年份</span>
-              <select
-                aria-label="统计年份"
-                value={year}
-                onChange={(event) => {
-                  setYear(Number(event.target.value));
-                  clearSelection();
-                }}
-              >
-                {years.map((value) => (
-                  <option key={value}>{value}</option>
-                ))}
-              </select>
-            </label>
+            <FilterSelect
+              label="统计年份"
+              kind="year"
+              value={String(year)}
+              options={years.map((value) => ({
+                value: String(value),
+                label: String(value),
+              }))}
+              onChange={(value) => {
+                setYear(Number(value));
+                clearSelection();
+              }}
+            />
           </div>
 
           {data?.mode === "demo" && (
@@ -261,11 +261,17 @@ export default function Dashboard() {
                     <span>
                       <b>{year}</b> / 01.01 — 12.31
                     </span>
-                    <span>
-                      {summary.requests === null
-                        ? "请求数未完整统计"
-                        : full(summary.requests) + " 次请求"}
-                    </span>
+                    {summary.requests === null ? (
+                      <details className="request-note">
+                        <summary>请求数未完整统计</summary>
+                        <div className="request-note-body">
+                          部分历史记录没有请求次数，因此不展示不完整的合计。Token
+                          用量照常计入；升级统计插件并重新上传后，可补齐日志中仍能恢复的次数。
+                        </div>
+                      </details>
+                    ) : (
+                      <span>{full(summary.requests)} 次请求</span>
+                    )}
                   </div>
                   <div
                     className="heat-scroll"
@@ -354,25 +360,22 @@ export default function Dashboard() {
                     <span>
                       活跃 <strong>{activeDays}</strong> 天
                     </span>
-                    <div
-                      className="legend"
-                      aria-label="色阶由零用量到最大用量，斜线表示未上报"
-                    >
-                      <span>0</span>
-                      {[0, 1, 2, 3, 4].map((value) => (
-                        <i key={value} className={"level-" + value} />
-                      ))}
-                      <span>{compact(peakDay)}</span>
-                      <i className="missing" />
-                      <span>未上报</span>
-                    </div>
                   </div>
                 </div>
 
-                <aside className="day-reading" aria-label="当日用量明细">
+                <aside className="day-reading" aria-label="日期详情">
                   <div className="reading-head">
-                    <span>当日读数</span>
-                    <Icon name="activity" />
+                    <span>日期详情</span>
+                    {selectedDate && selectedDate !== defaultDate ? (
+                      <button
+                        className="reading-reset"
+                        onClick={clearSelection}
+                      >
+                        返回{year === currentYear ? "今天" : "最近日期"}
+                      </button>
+                    ) : (
+                      <Icon name="activity" />
+                    )}
                   </div>
                   <time dateTime={readingDate}>
                     {readingDate.replaceAll("-", " / ")}
@@ -416,66 +419,58 @@ export default function Dashboard() {
 
               <div className="filter-strip">
                 <div className="filter-fields">
-                  <label
-                    className={
-                      device ? "filter-field is-filtered" : "filter-field"
-                    }
-                  >
-                    <Icon name="device" />
-                    <select
-                      aria-label="设备"
-                      value={device}
-                      onChange={(event) => {
-                        setDevice(event.target.value);
-                        clearSelection();
-                      }}
-                    >
-                      <option value="">所有设备</option>
-                      {options("device").map((value) => (
-                        <option key={value}>{value}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label
-                    className={
-                      client ? "filter-field is-filtered" : "filter-field"
-                    }
-                  >
-                    <Icon name="tokens" />
-                    <select
-                      aria-label="客户端"
-                      value={client}
-                      onChange={(event) => {
-                        setClient(event.target.value);
-                        clearSelection();
-                      }}
-                    >
-                      <option value="">所有客户端</option>
-                      {options("client").map((value) => (
-                        <option key={value}>{value}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label
-                    className={
-                      model ? "filter-field is-filtered" : "filter-field"
-                    }
-                  >
-                    <Icon name="model" />
-                    <select
-                      aria-label="模型"
-                      value={model}
-                      onChange={(event) => {
-                        setModel(event.target.value);
-                        clearSelection();
-                      }}
-                    >
-                      <option value="">所有模型</option>
-                      {options("model").map((value) => (
-                        <option key={value}>{value}</option>
-                      ))}
-                    </select>
-                  </label>
+                  <FilterSelect
+                    label="设备"
+                    icon="device"
+                    value={device}
+                    active={Boolean(device)}
+                    options={[
+                      { value: "", label: "所有设备" },
+                      ...options("device").map((value) => ({
+                        value,
+                        label: value,
+                      })),
+                    ]}
+                    onChange={(value) => {
+                      setDevice(value);
+                      clearSelection();
+                    }}
+                  />
+                  <FilterSelect
+                    label="客户端"
+                    icon="tokens"
+                    value={client}
+                    active={Boolean(client)}
+                    options={[
+                      { value: "", label: "所有客户端" },
+                      ...options("client").map((value) => ({
+                        value,
+                        label: value,
+                      })),
+                    ]}
+                    onChange={(value) => {
+                      setClient(value);
+                      clearSelection();
+                    }}
+                  />
+                  <FilterSelect
+                    label="模型"
+                    icon="model"
+                    kind="model"
+                    value={model}
+                    active={Boolean(model)}
+                    options={[
+                      { value: "", label: "所有模型" },
+                      ...options("model").map((value) => ({
+                        value,
+                        label: value,
+                      })),
+                    ]}
+                    onChange={(value) => {
+                      setModel(value);
+                      clearSelection();
+                    }}
+                  />
                   {filters && (
                     <button
                       className="reset-button"
@@ -539,7 +534,17 @@ export default function Dashboard() {
                     <small>模型</small>
                   </span>
                 </div>
-                <div className="model-list" key={filterKey}>
+                <div
+                  className="model-list"
+                  key={filterKey}
+                  tabIndex={modelList.length > 5 ? 0 : undefined}
+                  role="region"
+                  aria-label={
+                    modelList.length > 5
+                      ? "模型用量排名，显示前五行，可滚动查看其余模型"
+                      : "模型用量排名"
+                  }
+                >
                   {modelList.length ? (
                     modelList.map(([name, value], index) => (
                       <div className="model-row" key={name}>
@@ -548,7 +553,7 @@ export default function Dashboard() {
                         </span>
                         <div className="model-detail">
                           <div className="model-label">
-                            <strong>{name}</strong>
+                            <strong title={name}>{name}</strong>
                             <span>
                               {compact(value)}
                               <small>
@@ -566,7 +571,7 @@ export default function Dashboard() {
                                   width:
                                     (value / Math.max(1, summary.total)) * 100 +
                                     "%",
-                                  "--bar-delay": index * 70 + "ms",
+                                  "--bar-delay": Math.min(index, 4) * 70 + "ms",
                                 } as CSSProperties
                               }
                             />

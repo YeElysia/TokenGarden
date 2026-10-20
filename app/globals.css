@@ -194,12 +194,20 @@ dd {
   height: 16px;
   animation: marker-arrow 200ms 250ms var(--ease-out) both;
 }
+.activity-panel {
+  z-index: 3;
+}
 .activity-head {
+  min-height: 74px;
+  padding: 12px 26px;
   background: var(--accent);
   border-bottom: 1px solid
     color-mix(in srgb, var(--accent-ink) 15%, var(--accent));
   border-radius: 19px 19px 0 0;
   margin-bottom: 18px;
+}
+.activity-head .section-heading h2 {
+  font-size: 22px;
 }
 .activity-head .section-heading h2,
 .activity-head .section-marker {
@@ -210,17 +218,6 @@ dd {
 }
 .activity-head .section-marker::before {
   background: color-mix(in srgb, var(--accent-ink) 10%, var(--accent));
-}
-.activity-head select {
-  background: var(--panel);
-  border-color: transparent;
-  color: var(--ink);
-}
-.year-picker select {
-  font: 600 14px var(--mono);
-  min-width: 99px;
-  background: var(--surface);
-  border-color: transparent;
 }
 .data-status {
   display: flex;
@@ -420,26 +417,6 @@ dd {
   font-family: var(--mono);
   font-weight: 600;
 }
-.legend {
-  display: flex;
-  gap: 4px;
-  align-items: center;
-  white-space: nowrap;
-  font-size: 10px;
-}
-.legend i {
-  display: inline-block;
-  width: 11px;
-  height: 11px;
-  border-radius: 2px;
-  border: 1px solid color-mix(in srgb, var(--ink) 8%, transparent);
-}
-.legend span {
-  margin: 0 3px;
-}
-.legend .missing {
-  margin-left: 7px;
-}
 .day-reading {
   display: flex;
   flex-direction: column;
@@ -526,50 +503,180 @@ dd {
   gap: 8px;
   min-width: 0;
 }
-.filter-field {
+/* Shared custom lists keep the same controls across operating systems. */
+.filter-select {
+  position: relative;
+  min-width: 0;
+  width: 174px;
+}
+.filter-select.is-open {
+  z-index: 20;
+}
+.select-trigger {
   display: flex;
   align-items: center;
-  position: relative;
+  gap: 10px;
+  width: 100%;
+  min-height: 42px;
+  padding: 9px 12px;
+  color: var(--ink);
   background: var(--surface);
   border: 1px solid transparent;
   border-radius: 9px;
-  min-width: 0;
+  font-size: 12px;
+  text-align: left;
   transition:
-    background-color 200ms,
-    border-color 200ms;
+    border-color 160ms,
+    background-color 160ms;
 }
-.filter-field > svg {
-  pointer-events: none;
-  position: absolute;
-  left: 11px;
+.select-trigger > svg:first-child:not(.select-chevron) {
   width: 15px;
   height: 15px;
   color: var(--muted);
 }
-.filter-field select {
-  border: 0;
-  background: transparent;
-  font-size: 12px;
-  padding-left: 34px;
-  min-width: 133px;
-  max-width: 250px;
+.select-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.filter-field.is-filtered {
+.select-chevron {
+  transition: transform 160ms;
+}
+.is-open .select-chevron {
+  transform: rotate(180deg);
+}
+.is-open .select-trigger {
+  border-color: var(--muted);
+}
+.filter-select.is-filtered .select-trigger {
   border-color: var(--line);
   background: color-mix(in srgb, var(--ink) 9%, var(--panel));
 }
-.filter-field.is-filtered::before {
+.filter-select.is-filtered .select-trigger::before {
   content: "";
   position: absolute;
-  top: 10px;
-  bottom: 10px;
   left: 0;
+  height: 20px;
   width: 3px;
-  border-radius: 0 2px 2px 0;
   background: var(--ink);
+  border-radius: 0 2px 2px 0;
 }
-.filter-field.is-filtered > svg {
+.select-model {
+  width: 270px;
+}
+.select-year {
+  width: 100px;
+}
+.select-year .select-trigger {
+  font: 600 14px var(--mono);
+}
+.select-menu {
+  position: absolute;
+  top: calc(100% + 7px);
+  left: 0;
+  z-index: 20;
+  width: max(100%, 220px);
+  max-width: calc(100vw - 64px);
+  max-height: min(320px, 55vh);
+  padding: 5px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--panel);
   color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  box-shadow: 0 12px 30px color-mix(in srgb, var(--ink) 12%, transparent);
+  animation: select-enter 140ms var(--ease-out);
+  scrollbar-width: thin;
+}
+.select-model .select-menu {
+  width: max(100%, 330px);
+}
+.select-year .select-menu {
+  left: auto;
+  right: 0;
+  width: 120px;
+}
+.select-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  width: 100%;
+  min-height: 40px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--ink);
+  background: transparent;
+  text-align: left;
+}
+.select-option > span:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.select-option[aria-selected="true"] {
+  background: var(--surface);
+  font-weight: 600;
+  box-shadow: inset 3px 0 var(--ink);
+}
+.select-option:focus-visible {
+  outline-offset: -2px;
+  background: var(--surface);
+}
+.select-check {
+  flex-shrink: 0;
+  width: 14px;
+}
+@keyframes select-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.reading-reset {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 10px;
+  padding: 3px 0 3px 6px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.request-note {
+  position: relative;
+  font-size: 11px;
+  text-align: right;
+}
+.request-note summary {
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 4px;
+}
+.request-note-body {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 10px);
+  z-index: 10;
+  width: 270px;
+  max-width: calc(100vw - 80px);
+  padding: 14px 16px;
+  text-align: left;
+  line-height: 1.8;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--ink) 10%, transparent);
 }
 .filter-timezone {
   white-space: nowrap;
@@ -696,9 +803,16 @@ dd {
 }
 .model-list {
   padding: 0 25px;
-  min-height: 185px;
+  max-height: 320px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--tertiary) transparent;
+  scroll-snap-type: y proximity;
 }
 .model-row {
+  height: 64px;
+  scroll-snap-align: start;
   display: flex;
   gap: 14px;
   align-items: center;
@@ -1095,7 +1209,8 @@ footer i {
 }
 
 @media (any-hover: hover) {
-  select:hover {
+  .select-trigger:hover,
+  .select-option:hover {
     border-color: var(--muted);
     background-color: var(--surface);
   }
@@ -1263,6 +1378,8 @@ footer i {
     gap: 12px;
   }
   .activity-head {
+    padding: 12px 18px;
+    min-height: 72px;
     align-items: center;
     border-radius: 16px 16px 0 0;
   }
@@ -1272,11 +1389,6 @@ footer i {
   .activity-head .section-marker {
     gap: 8px;
     padding: 8px 6px;
-  }
-  .year-picker select {
-    min-width: 82px;
-    padding-left: 10px;
-    padding-right: 24px;
   }
   .section-heading h2 {
     font-size: 26px;
@@ -1304,17 +1416,6 @@ footer i {
     flex-wrap: wrap;
     row-gap: 12px;
   }
-  .legend {
-    margin-left: auto;
-    font-size: 9px;
-  }
-  .legend i {
-    width: 10px;
-    height: 10px;
-  }
-  .legend span {
-    margin: 0 1px;
-  }
   .reading-details {
     gap: 17px;
   }
@@ -1330,15 +1431,26 @@ footer i {
     width: 100%;
     gap: 8px;
   }
-  .filter-field select {
+  .filter-select {
     width: 100%;
-    min-width: 0;
-    max-width: none;
-    padding-right: 22px;
-    font-size: 11px;
   }
-  .filter-field:nth-child(3) {
+  .select-year {
+    width: 88px;
+    flex-shrink: 0;
+  }
+  .select-trigger {
+    min-height: 42px;
+    font-size: 12px;
+    gap: 8px;
+  }
+  .select-model {
     grid-column: 1 / -1;
+  }
+  .filter-fields .select-menu {
+    width: 100%;
+    max-width: 100%;
+    left: 0;
+    right: auto;
   }
   .reset-button {
     grid-column: 1 / -1;
