@@ -2,6 +2,39 @@
 
 服务端提供相互隔离的两个入口：`POST /api/upload/ccs` 和 `POST /api/upload/dsh`。每次上传是一个“渠道 × 设备 × 日期”的累计快照。服务端按客户端、模型逐条保留总 token 最高的记录；缺席模型不会被删除，两个渠道和不同设备最后相加。
 
+## CC Switch（Claude Code / Codex 等）
+
+需要 Node.js 22.13 或更新版本。默认以只读方式读取 `~/.cc-switch/cc-switch.db`，同时采集请求明细和归档日汇总，不修改数据库，不读取 provider 配置、密钥、对话或会话日志。只能上传 CC Switch 已经记录的用量；未进入 CC Switch 的本地会话不在此采集器的范围内。
+
+先预览，不联网、不写同步状态：
+
+```sh
+node collector/ccs-upload.mjs --device macbook-pro --dry-run
+```
+
+首次配置时复制 `collector/.env.example` 为 `collector/.env.local`；已有 DSH 配置则直接补充 `CCS_UPLOAD_TOKEN`，不要覆盖原配置。填写站点地址、稳定的公开设备标识，以及与 Vercel 服务端一致的 CCS token。两个渠道可以共用配置文件和设备标识，使用各自独立的上传 token。
+
+```sh
+node --env-file=collector/.env.local collector/ccs-upload.mjs
+```
+
+持续同步，默认每 300 秒检查一次：
+
+```sh
+node --env-file=collector/.env.local collector/ccs-upload.mjs --watch
+```
+
+首次上传全部已有日期，之后跳过内容未变化的日期。状态默认保存在 `~/.cc-switch/token-garden-upload/state.json`，按站点与设备区分，与 DSH 状态独立。失败后可重试；服务端继续遵循各模型累计量只能提高的规则。版本取数据库与 WAL 文件的修改时间，内容指纹不会因为单纯归档明细而重复上传。
+
+采集口径：
+
+- 按客户端和完整模型名合并不同 provider 的用量。不会把同样计数的不同请求误当作重复请求删除。
+- 按 CC Switch 的 `input_token_semantics`（旧格式、总输入、纯新增输入）逐条归一化，再求和；上传输入包含新增输入、缓存读取和缓存创建，缓存子集只计读取。对应规则见 [CC Switch SQL helpers](https://github.com/farion1231/cc-switch/blob/main/src-tauri/src/services/sql_helpers.rs)。
+- 请求次数是明细记录数加归档的 `request_count`，包含失败记录。沿用 CC Switch 的统计记录口径，不保证等于所有上游 HTTP 尝试次数。归档与明细在同一只读事务内相加，参照 [CC Switch usage stats](https://github.com/farion1231/cc-switch/blob/main/src-tauri/src/services/usage_stats.rs)。
+- 明细按运行采集器的本地日历天归组，归档保留原日期。与站点北京时间对齐时，应在 Asia/Shanghai 时区运行；历史归档无法重新按时区拆分。
+
+`--db` 或 `CCS_DB_FILE` 可指定数据库；`--state` 可指定同步状态文件；`--interval` 设置 watch 间隔（最小 60 秒）。数据库正在使用 WAL 时也可以读取，无需关闭 CC Switch。
+
 ## DSH
 
 支持原版 `@duke-dsh-plugins/dsh-token-stats@1.7.3` 的 version 1 文件，以及仓库内重写版 `2.0.0-local.1` 的 version 2 文件。直接读取 `$DSH_HOME/data/dsh-token-stats/stats.json`，默认 `DSH_HOME=~/.dsh`，不修改插件或统计文件，不读取会话日志、provider 凭据或套餐余额。
@@ -20,7 +53,7 @@
 node collector/dsh-upload.mjs --device macbook-pro --dry-run
 ```
 
-复制 `collector/.env.example` 为 `collector/.env.local`，填写已部署的站点地址、稳定的公开设备标识、服务端相同的 DSH_UPLOAD_TOKEN。两个渠道使用相同 device 时会合并为同一设备；设备标识不要随昵称变化，也不要让不同设备共用一个标识。
+首次配置时复制 `collector/.env.example` 为 `collector/.env.local`；已有 CCS 配置则补充 `DSH_UPLOAD_TOKEN`。填写已部署的站点地址、稳定的公开设备标识、服务端相同的 DSH_UPLOAD_TOKEN。两个渠道使用相同 device 时会合并为同一设备；设备标识不要随昵称变化，也不要让不同设备共用一个标识。
 
 ```sh
 node --env-file=collector/.env.local collector/dsh-upload.mjs
@@ -38,9 +71,9 @@ node --env-file=collector/.env.local collector/dsh-upload.mjs --watch
 
 `--stats`、`--state` 可指定文件位置，`--interval` 可设置 watch 间隔（最小 60 秒）。配置完成前只有 dry-run，不会上传真实数据。
 
-## CCS 协议
+## 上传协议
 
-CCS 的服务端通道已实现，本地 CC Switch 读取适配器仍待实现。CCS 使用独立的 `CCS_UPLOAD_TOKEN`；它与 DSH token 不通用。
+CCS 使用独立的 `CCS_UPLOAD_TOKEN`；它与 DSH token 不通用。下面的累计快照格式适用于两个渠道。
 
 ```json
 {
