@@ -209,3 +209,57 @@ test("higher total wins as one coherent row without independently inflating comp
   );
   assert.equal((await readUsage(execute))[0].input, 200);
 });
+
+test("request counts can be backfilled and increased at identical token counters", async () => {
+  await saveSnapshot(
+    execute,
+    snapshot({ source: "dsh", rows: [{ ...row(), requests: null }] }),
+  );
+  assert.equal(
+    await saveSnapshot(
+      execute,
+      snapshot({
+        source: "dsh",
+        revision: 2,
+        rows: [{ ...row(), requests: 3 }],
+      }),
+    ),
+    true,
+  );
+  assert.equal((await readUsage(execute))[0].requests, 3);
+  assert.equal(
+    await saveSnapshot(
+      execute,
+      snapshot({
+        source: "dsh",
+        revision: 3,
+        rows: [{ ...row(), requests: 5 }],
+      }),
+    ),
+    true,
+  );
+  assert.equal(
+    await saveSnapshot(
+      execute,
+      snapshot({
+        source: "dsh",
+        revision: 4,
+        rows: [{ ...row(), requests: 4 }],
+      }),
+    ),
+    false,
+  );
+  assert.equal(
+    await saveSnapshot(
+      execute,
+      snapshot({
+        source: "dsh",
+        revision: 5,
+        rows: [{ ...row(90, 20), requests: 99 }],
+      }),
+    ),
+    false,
+  );
+  assert.equal((await readUsage(execute))[0].requests, 5);
+  assert.equal(summarize(await readUsage(execute)).total, 120);
+});

@@ -50,7 +50,12 @@ BEGIN
  ON CONFLICT(date,source,device,client,model) DO UPDATE
  SET input_tokens=EXCLUDED.input_tokens, output_tokens=EXCLUDED.output_tokens,
      cached_input_tokens=EXCLUDED.cached_input_tokens, request_count=EXCLUDED.request_count
- WHERE EXCLUDED.input_tokens+EXCLUDED.output_tokens > usage_daily.input_tokens+usage_daily.output_tokens;
+ WHERE EXCLUDED.input_tokens+EXCLUDED.output_tokens > usage_daily.input_tokens+usage_daily.output_tokens
+    OR (EXCLUDED.input_tokens = usage_daily.input_tokens
+        AND EXCLUDED.output_tokens = usage_daily.output_tokens
+        AND EXCLUDED.cached_input_tokens = usage_daily.cached_input_tokens
+        AND EXCLUDED.request_count IS NOT NULL
+        AND (usage_daily.request_count IS NULL OR EXCLUDED.request_count > usage_daily.request_count));
  GET DIAGNOSTICS changed_rows = ROW_COUNT;
  RETURN changed_rows > 0;
 END;

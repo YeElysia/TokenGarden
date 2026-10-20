@@ -8,7 +8,7 @@ const object = (value) =>
 const hash = (value) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
 export function dshSnapshots(store, device) {
-  if (!object(store) || store.version !== 1)
+  if (!object(store) || ![1, 2].includes(store.version))
     throw new Error("不支持的 DSH 统计文件版本");
   if (!Number.isSafeInteger(store.savedAt) || store.savedAt <= 0)
     throw new Error("DSH savedAt 无效");
@@ -41,7 +41,7 @@ export function dshSnapshots(store, device) {
             input: input + cacheRead + cacheWrite,
             output,
             cached: cacheRead,
-            requests: null,
+            requests: store.version === 2 ? rec.requests : null,
           };
         });
       const { source, ...snapshot } = parseSnapshot("dsh", {

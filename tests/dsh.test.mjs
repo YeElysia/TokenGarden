@@ -60,7 +60,7 @@ test("provider-qualified models stay separate and empty days produce an empty no
   );
 });
 for (const [name, patch] of [
-  ["unsupported format", { version: 2 }],
+  ["unsupported format", { version: 3 }],
   ["missing revision", { savedAt: undefined }],
   ["invalid date", { days: { "2026-02-30": {} } }],
   [
@@ -78,3 +78,22 @@ for (const [name, patch] of [
 ])
   test(`DSH rejects ${name}`, () =>
     assert.throws(() => dshSnapshots({ ...store, ...patch }, "mac")));
+
+test("version-2 ledger exports exact request counts and preserves unknown legacy counts", () => {
+  const rec = store.days["2026-10-19"]["p::a"];
+  const [snapshot] = dshSnapshots(
+    {
+      ...store,
+      version: 2,
+      days: {
+        "2026-10-19": {
+          "p::a": { ...rec, requests: 7 },
+          "p::b": { ...rec, requests: null },
+        },
+      },
+    },
+    "mac",
+  );
+  assert.equal(snapshot.rows[0].requests, 7);
+  assert.equal(snapshot.rows[1].requests, null);
+});
