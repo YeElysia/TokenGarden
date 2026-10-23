@@ -700,6 +700,10 @@ dd {
   width: 11px;
   height: 11px;
 }
+.reset-button.active {
+  background: var(--ink);
+  color: var(--bg);
+}
 .metrics-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

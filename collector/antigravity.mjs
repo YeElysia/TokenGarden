@@ -67,17 +67,18 @@ export async function readAntigravitySnapshots(dbFile, device) {
     db.exec("PRAGMA query_only=ON; PRAGMA busy_timeout=5000; BEGIN");
     validateTable(db);
     // timestamp 单位是秒（Unix epoch seconds）；日期按本地时区聚合，与 ccs 行为一致
+    // device 固定为 antigravity（代理层），client 固定为 neo-mofox（消费方），多账号用量合并
     const stmt = db.prepare(
       `SELECT date(timestamp, 'unixepoch', 'localtime') AS date,
-              account_email AS client,
+              'neo-mofox' AS client,
               model,
               SUM(input_tokens) AS input,
               SUM(output_tokens) AS output,
               SUM(cached_tokens) AS cached,
               COUNT(*) AS requests
        FROM token_usage
-       GROUP BY date, account_email, model
-       ORDER BY date, account_email, model`,
+       GROUP BY date, model
+       ORDER BY date, model`,
     );
     stmt.setReadBigInts(true);
     records = stmt.all();

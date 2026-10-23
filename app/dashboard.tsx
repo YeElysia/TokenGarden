@@ -75,6 +75,7 @@ export default function Dashboard() {
   const [device, setDevice] = useState("");
   const [client, setClient] = useState("");
   const [model, setModel] = useState("");
+  const [includeAntigravity, setIncludeAntigravity] = useState(false);
   const [selectedDate, setSelectedDate] = useState("");
   const [previewDate, setPreviewDate] = useState("");
   const [retry, setRetry] = useState(0);
@@ -94,7 +95,14 @@ export default function Dashboard() {
     return () => controller.abort();
   }, [retry]);
 
-  const rows = data?.rows ?? EMPTY_ROWS;
+  const allRows = data?.rows ?? EMPTY_ROWS;
+  const rows = useMemo(
+    () =>
+      includeAntigravity
+        ? allRows
+        : allRows.filter((r) => r.source !== "antigravity"),
+    [allRows, includeAntigravity],
+  );
   const today = dayKey(new Date());
   const currentYear = Number(today.slice(0, 4));
   const summary = useMemo(
@@ -485,6 +493,13 @@ export default function Dashboard() {
                       重置
                     </button>
                   )}
+                  <button
+                    className={`reset-button ${includeAntigravity ? "active" : ""}`}
+                    onClick={() => setIncludeAntigravity((v) => !v)}
+                    title="切换是否统计 antigravity 渠道数据"
+                  >
+                    antigravity {includeAntigravity ? "开" : "关"}
+                  </button>
                 </div>
                 <span className="filter-timezone">UTC+08:00</span>
               </div>

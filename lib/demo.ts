@@ -1,6 +1,6 @@
 export type UsageRow = {
   date: string;
-  source: "ccs" | "dsh";
+  source: "ccs" | "dsh" | "antigravity";
   device: string;
   client: string;
   model: string;
