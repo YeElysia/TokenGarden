@@ -16,14 +16,14 @@ CREATE TABLE IF NOT EXISTS usage_daily (
 ALTER TABLE usage_daily ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'ccs';
 ALTER TABLE usage_daily ALTER COLUMN request_count DROP NOT NULL;
 ALTER TABLE usage_daily DROP CONSTRAINT IF EXISTS usage_daily_source_check;
-ALTER TABLE usage_daily ADD CONSTRAINT usage_daily_source_check CHECK(source IN ('ccs','dsh'));
+ALTER TABLE usage_daily ADD CONSTRAINT usage_daily_source_check CHECK(source IN ('ccs','dsh','antigravity'));
 ALTER TABLE usage_daily DROP CONSTRAINT IF EXISTS usage_daily_pkey;
 ALTER TABLE usage_daily ADD PRIMARY KEY(date,source,device,client,model);
 
 -- One row serializes a channel/device/day merge; revision records the maximum seen version.
 CREATE TABLE IF NOT EXISTS usage_uploads (
  date DATE NOT NULL,
- source TEXT NOT NULL CHECK(source IN ('ccs','dsh')),
+ source TEXT NOT NULL CHECK(source IN ('ccs','dsh','antigravity')),
  device TEXT NOT NULL,
  revision BIGINT NOT NULL CHECK(revision > 0),
  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),

@@ -12,7 +12,9 @@ export async function POST(
       ? process.env.CCS_UPLOAD_TOKEN
       : source === "dsh"
         ? process.env.DSH_UPLOAD_TOKEN
-        : undefined;
+        : source === "antigravity"
+          ? process.env.ANTIGRAVITY_UPLOAD_TOKEN
+          : undefined;
   const url = process.env.UPLOAD_DATABASE_URL || process.env.DATABASE_URL;
   return handleUpload(request, source, {
     token,

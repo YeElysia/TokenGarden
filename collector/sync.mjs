@@ -48,7 +48,7 @@ export async function syncSnapshots({
   token,
   dryRun = false,
 }) {
-  if (!["ccs", "dsh"].includes(source)) throw new Error("上传渠道无效");
+  if (!["ccs", "dsh", "antigravity"].includes(source)) throw new Error("上传渠道无效");
   const label = source.toUpperCase();
   const days = snapshots.map((s) => ({
     date: s.date,
